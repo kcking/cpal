@@ -50,6 +50,8 @@ use super::{
 };
 use crate::{traits::DeviceTrait, BuildStreamError, StreamError};
 
+const LOW_LATENCY_BUFFER_SIZE: i64 = 10_000;
+
 pub type SupportedInputConfigs = std::vec::IntoIter<SupportedStreamConfigRange>;
 pub type SupportedOutputConfigs = std::vec::IntoIter<SupportedStreamConfigRange>;
 
@@ -656,7 +658,7 @@ impl Device {
                 let hresult = (*audio_client).Initialize(
                     share_mode,
                     AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                    0,
+                    LOW_LATENCY_BUFFER_SIZE,
                     0,
                     &format_attempt.Format,
                     ptr::null(),
@@ -808,7 +810,7 @@ impl Device {
                 let hresult = (*audio_client).Initialize(
                     share_mode,
                     AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                    0,
+                    LOW_LATENCY_BUFFER_SIZE,
                     0,
                     &format_attempt.Format,
                     ptr::null(),
