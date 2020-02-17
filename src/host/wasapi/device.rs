@@ -1,9 +1,15 @@
+use host::wasapi::winapi::um::audioclient::AUDCLNT_STREAMOPTIONS_RAW;
+use host::wasapi::winapi::um::audioclient::AUDCLNT_STREAMOPTIONS_MATCH_FORMAT;
+use host::wasapi::winapi::um::audioclient::AudioClientProperties;
+use host::wasapi::winapi::um::audiosessiontypes::AudioCategory_GameEffects;
+use host::wasapi::winapi::shared::minwindef::BOOL;
 use crate::{
     BackendSpecificError, Data, DefaultStreamConfigError, DeviceNameError, DevicesError,
     InputCallbackInfo, OutputCallbackInfo, SampleFormat, SampleRate, StreamConfig,
     SupportedStreamConfig, SupportedStreamConfigRange, SupportedStreamConfigsError,
     COMMON_SAMPLE_RATES,
 };
+use host::wasapi::winapi::shared::basetsd::UINT32;
 use std;
 use std::ffi::OsString;
 use std::fmt;
@@ -29,7 +35,7 @@ use super::winapi::shared::wtypes;
 use super::winapi::Interface;
 // https://msdn.microsoft.com/en-us/library/cc230355.aspx
 use super::winapi::um::audioclient::{
-    self, IAudioClient, IID_IAudioClient, AUDCLNT_E_DEVICE_INVALIDATED,
+    self, IAudioClient, IID_IAudioClient, IID_IAudioClient3, IAudioClient3, AUDCLNT_E_DEVICE_INVALIDATED,
 };
 use super::winapi::um::audiosessiontypes::{
     AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
@@ -60,13 +66,18 @@ pub type SupportedOutputConfigs = std::vec::IntoIter<SupportedStreamConfigRange>
 struct IAudioClientWrapper(*mut IAudioClient);
 unsafe impl Send for IAudioClientWrapper {}
 unsafe impl Sync for IAudioClientWrapper {}
+#[derive(Copy, Clone)]
+struct IAudioClient3Wrapper(*mut IAudioClient3);
+unsafe impl Send for IAudioClient3Wrapper {}
+unsafe impl Sync for IAudioClient3Wrapper {}
 
 /// An opaque type that identifies an end point.
 pub struct Device {
     device: *mut IMMDevice,
     /// We cache an uninitialized `IAudioClient` so that we can call functions from it without
     /// having to create/destroy audio clients all the time.
-    future_audio_client: Arc<Mutex<Option<IAudioClientWrapper>>>, // TODO: add NonZero around the ptr
+    future_audio_client: Arc<Mutex<Option<IAudioClient3Wrapper>>>, // TODO: add NonZero around the ptr
+    future_audio_client_3: Arc<Mutex<Option<IAudioClient3Wrapper>>>, // TODO: add NonZero around the ptr
 }
 
 impl DeviceTrait for Device {
@@ -386,22 +397,23 @@ impl Device {
         Device {
             device,
             future_audio_client: Arc::new(Mutex::new(None)),
+            future_audio_client_3: Arc::new(Mutex::new(None)),
         }
     }
 
     /// Ensures that `future_audio_client` contains a `Some` and returns a locked mutex to it.
     fn ensure_future_audio_client(
         &self,
-    ) -> Result<MutexGuard<Option<IAudioClientWrapper>>, IoError> {
+    ) -> Result<MutexGuard<Option<IAudioClient3Wrapper>>, IoError> {
         let mut lock = self.future_audio_client.lock().unwrap();
         if lock.is_some() {
             return Ok(lock);
         }
 
-        let audio_client: *mut IAudioClient = unsafe {
+        let audio_client: *mut IAudioClient3 = unsafe {
             let mut audio_client = ptr::null_mut();
             let hresult = (*self.device).Activate(
-                &IID_IAudioClient,
+                &IID_IAudioClient3,
                 CLSCTX_ALL,
                 ptr::null_mut(),
                 &mut audio_client,
@@ -414,14 +426,50 @@ impl Device {
             audio_client as *mut _
         };
 
-        *lock = Some(IAudioClientWrapper(audio_client));
+        *lock = Some(IAudioClient3Wrapper(audio_client));
+        Ok(lock)
+    }
+
+    fn ensure_future_audio_client_3(
+        &self,
+    ) -> Result<MutexGuard<Option<IAudioClient3Wrapper>>, IoError> {
+        let mut lock = self.future_audio_client_3.lock().unwrap();
+        if lock.is_some() {
+            return Ok(lock);
+        }
+
+        let audio_client: *mut IAudioClient3 = unsafe {
+            let mut audio_client = ptr::null_mut();
+            let hresult = (*self.device).Activate(
+                &IID_IAudioClient3,
+                CLSCTX_ALL,
+                ptr::null_mut(),
+                &mut audio_client,
+            );
+
+            // can fail if the device has been disconnected since we enumerated it, or if
+            // the device doesn't support playback for some reason
+            check_result(hresult)?;
+            assert!(!audio_client.is_null());
+            audio_client as *mut _
+        };
+
+        *lock = Some(IAudioClient3Wrapper(audio_client));
         Ok(lock)
     }
 
     /// Returns an uninitialized `IAudioClient`.
     #[inline]
-    pub(crate) fn build_audioclient(&self) -> Result<*mut IAudioClient, IoError> {
+    pub(crate) fn build_audioclient(&self) -> Result<*mut IAudioClient3, IoError> {
         let mut lock = self.ensure_future_audio_client()?;
+        let client = lock.unwrap().0;
+        *lock = None;
+        Ok(client)
+    }
+
+    #[inline]
+    pub(crate) fn build_audioclient3(&self) -> Result<*mut IAudioClient3, IoError> {
+        let mut lock = self.ensure_future_audio_client_3()?;
         let client = lock.unwrap().0;
         *lock = None;
         Ok(client)
@@ -473,7 +521,7 @@ impl Device {
 
             // If the default format can't succeed we have no hope of finding other formats.
             assert_eq!(
-                is_format_supported(client, default_waveformatex_ptr.0)?,
+                is_format_supported(std::mem::transmute(client), default_waveformatex_ptr.0)?,
                 true
             );
 
@@ -497,7 +545,7 @@ impl Device {
                 test_format.nSamplesPerSec = rate;
                 test_format.nAvgBytesPerSec =
                     rate * u32::from((*default_waveformatex_ptr.0).nBlockAlign);
-                if is_format_supported(client, test_format.as_ptr())? {
+                if is_format_supported(std::mem::transmute(client), test_format.as_ptr())? {
                     supported_sample_rates.push(rate);
                 }
             }
@@ -648,7 +696,7 @@ impl Device {
                 let share_mode = AUDCLNT_SHAREMODE_SHARED;
 
                 // Ensure the format is supported.
-                match super::device::is_format_supported(audio_client, &format_attempt.Format) {
+                match super::device::is_format_supported(std::mem::transmute(audio_client), &format_attempt.Format) {
                     Ok(false) => return Err(BuildStreamError::StreamConfigNotSupported),
                     Err(_) => return Err(BuildStreamError::DeviceNotAvailable),
                     _ => (),
@@ -658,7 +706,7 @@ impl Device {
                 let hresult = (*audio_client).Initialize(
                     share_mode,
                     AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                    LOW_LATENCY_BUFFER_SIZE,
+                    0,
                     0,
                     &format_attempt.Format,
                     ptr::null(),
@@ -757,7 +805,7 @@ impl Device {
             })?;
 
             Ok(StreamInner {
-                audio_client,
+                audio_client: std::mem::transmute(audio_client),
                 audio_clock,
                 client_flow,
                 event,
@@ -792,6 +840,17 @@ impl Device {
                     return Err(err.into());
                 }
             };
+            let audio_client_3 = match self.build_audioclient3() {
+                Ok(client) => client,
+                Err(ref e) if e.raw_os_error() == Some(AUDCLNT_E_DEVICE_INVALIDATED) => {
+                    return Err(BuildStreamError::DeviceNotAvailable)
+                }
+                Err(e) => {
+                    let description = format!("{}", e);
+                    let err = BackendSpecificError { description };
+                    return Err(err.into());
+                }
+            };
 
             // Computing the format and initializing the device.
             let waveformatex = {
@@ -800,21 +859,71 @@ impl Device {
                 let share_mode = AUDCLNT_SHAREMODE_SHARED;
 
                 // Ensure the format is supported.
-                match super::device::is_format_supported(audio_client, &format_attempt.Format) {
+                match super::device::is_format_supported((*audio_client).deref().deref(), &format_attempt.Format) {
                     Ok(false) => return Err(BuildStreamError::StreamConfigNotSupported),
                     Err(_) => return Err(BuildStreamError::DeviceNotAvailable),
                     _ => (),
                 }
 
+                // let properties = AudioClientProperties{
+                //     cbSize: std::mem::size_of::<AudioClientProperties>() as u32,
+                //     bIsOffload: 0,
+                //     eCategory: AudioCategory_GameEffects,
+                //     Options: AUDCLNT_STREAMOPTIONS_RAW,
+                // };
+                // let hr = (*audio_client).SetClientProperties(&properties);
+                // println!("set properties: {:?}", check_result(hr));
+
+                let mut default_period_in_frames: UINT32 = 0;
+                let mut fundamental_period_in_frames: UINT32 = 0;
+                let mut min_period_in_frames: UINT32 = 0;
+                let mut max_period_in_frames: UINT32 = 0;
+                // println!("{:?}", waveformatex.nSamplesPerSec);
+                //TODO: if this fails, fall back to normal Initialize
+                let hr = (*audio_client).GetSharedModeEnginePeriod(&format_attempt.Format, &mut default_period_in_frames, &mut fundamental_period_in_frames, &mut min_period_in_frames, &mut max_period_in_frames);
+                println!("{:?}", check_result(hr));
+                println!("{} {} {} {}", default_period_in_frames, fundamental_period_in_frames, min_period_in_frames, max_period_in_frames);
+
+                // let mut min : REFERENCE_TIME = 0;
+                // let mut max : REFERENCE_TIME = 0;
+                // let hr = (*audio_client).GetBufferSizeLimits(
+                //     &format_attempt.Format,
+                //     0,
+                //     &mut min,
+                //     &mut max,
+                // );
+                // println!("GetBufferSizeLimits {:?} {} {}", check_result(hr), min, max);
+                match check_result(hr) {
+                    Err(ref e) if e.raw_os_error() == Some(AUDCLNT_E_DEVICE_INVALIDATED) => {
+                        (*audio_client).Release();
+                        return Err(BuildStreamError::DeviceNotAvailable);
+                    }
+                    Err(e) => {
+                        (*audio_client).Release();
+                        let description = format!("{}", e);
+                        let err = BackendSpecificError { description };
+                        return Err(err.into());
+                    }
+                    Ok(()) => (),
+                };
+
+
                 // finally initializing the audio client
-                let hresult = (*audio_client).Initialize(
-                    share_mode,
+                // let hresult = (*audio_client).Initialize(
+                //     share_mode,
+                //     AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+                //     0,
+                //     0,
+                //     &format_attempt.Format,
+                //     ptr::null(),
+                // );
+                let hresult = (*audio_client).InitializeSharedAudioStream(
                     AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                    LOW_LATENCY_BUFFER_SIZE,
-                    0,
+                    min_period_in_frames,
                     &format_attempt.Format,
                     ptr::null(),
                 );
+
                 match check_result(hresult) {
                     Err(ref e) if e.raw_os_error() == Some(AUDCLNT_E_DEVICE_INVALIDATED) => {
                         (*audio_client).Release();
@@ -831,6 +940,29 @@ impl Device {
 
                 format_attempt.Format
             };
+                use host::wasapi::winapi::shared::mmreg::WAVEFORMATEX;
+                // let mut format: WAVEFORMATEX = WAVEFORMATEX{
+                //     wFormatTag: 0,
+                //     nChannels: 0,
+                //     nSamplesPerSec: 0,
+                //     nAvgBytesPerSec: 0,
+                //     nBlockAlign: 0,
+                //     wBitsPerSample: 0,
+                //     cbSize: 0,
+                // };
+                use host::wasapi::winapi::um::strmif::REFERENCE_TIME;
+
+                let mut min : REFERENCE_TIME = 0;
+                let hr = (*audio_client).GetStreamLatency(&mut min);
+                println!("streamlatency {:?}, {}", check_result(hr), min);
+
+                let mut offload_capable : BOOL = 0;
+                let hr = (*audio_client).IsOffloadCapable(AudioCategory_GameEffects, &mut offload_capable);
+                println!("offload_capable {:?}, {}", check_result(hr), offload_capable);
+
+                let mut buf_size = 0u32;
+                (*audio_client).GetBufferSize(&mut buf_size);
+                println!("buf_size: {} frames", buf_size);
 
             // Creating the event that will be signalled whenever we need to submit some samples.
             let event = {
@@ -909,7 +1041,7 @@ impl Device {
             })?;
 
             Ok(StreamInner {
-                audio_client,
+                audio_client: std::mem::transmute(audio_client),
                 audio_clock,
                 client_flow,
                 event,
@@ -984,6 +1116,7 @@ impl Clone for Device {
         Device {
             device: self.device,
             future_audio_client: self.future_audio_client.clone(),
+            future_audio_client_3: self.future_audio_client_3.clone(),
         }
     }
 }
