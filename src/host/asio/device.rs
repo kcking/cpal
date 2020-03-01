@@ -180,10 +180,6 @@ impl Iterator for Devices {
             }
         }
     }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        unimplemented!()
-    }
 }
 
 pub(crate) fn convert_data_type(ty: &sys::AsioSampleType) -> Option<SampleFormat> {
