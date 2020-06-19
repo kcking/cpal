@@ -1,8 +1,3 @@
-use host::wasapi::winapi::um::audioclient::AUDCLNT_STREAMOPTIONS_RAW;
-use host::wasapi::winapi::um::audioclient::AUDCLNT_STREAMOPTIONS_MATCH_FORMAT;
-use host::wasapi::winapi::um::audioclient::AudioClientProperties;
-use host::wasapi::winapi::um::audiosessiontypes::AudioCategory_GameEffects;
-use host::wasapi::winapi::shared::minwindef::BOOL;
 use crate::{
     BackendSpecificError, Data, DefaultStreamConfigError, DeviceNameError, DevicesError,
     InputCallbackInfo, OutputCallbackInfo, SampleFormat, SampleRate, StreamConfig,
@@ -10,6 +5,11 @@ use crate::{
     COMMON_SAMPLE_RATES,
 };
 use host::wasapi::winapi::shared::basetsd::UINT32;
+use host::wasapi::winapi::shared::minwindef::BOOL;
+use host::wasapi::winapi::um::audioclient::AudioClientProperties;
+use host::wasapi::winapi::um::audioclient::AUDCLNT_STREAMOPTIONS_MATCH_FORMAT;
+use host::wasapi::winapi::um::audioclient::AUDCLNT_STREAMOPTIONS_RAW;
+use host::wasapi::winapi::um::audiosessiontypes::AudioCategory_GameEffects;
 use std;
 use std::ffi::OsString;
 use std::fmt;
@@ -35,7 +35,8 @@ use super::winapi::shared::wtypes;
 use super::winapi::Interface;
 // https://msdn.microsoft.com/en-us/library/cc230355.aspx
 use super::winapi::um::audioclient::{
-    self, IAudioClient, IID_IAudioClient, IID_IAudioClient3, IAudioClient3, AUDCLNT_E_DEVICE_INVALIDATED,
+    self, IAudioClient, IAudioClient3, IID_IAudioClient, IID_IAudioClient3,
+    AUDCLNT_E_DEVICE_INVALIDATED,
 };
 use super::winapi::um::audiosessiontypes::{
     AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
@@ -696,7 +697,10 @@ impl Device {
                 let share_mode = AUDCLNT_SHAREMODE_SHARED;
 
                 // Ensure the format is supported.
-                match super::device::is_format_supported(std::mem::transmute(audio_client), &format_attempt.Format) {
+                match super::device::is_format_supported(
+                    std::mem::transmute(audio_client),
+                    &format_attempt.Format,
+                ) {
                     Ok(false) => return Err(BuildStreamError::StreamConfigNotSupported),
                     Err(_) => return Err(BuildStreamError::DeviceNotAvailable),
                     _ => (),
@@ -799,10 +803,11 @@ impl Device {
             // `run()` method and added to the `RunContext`.
             let client_flow = AudioClientFlow::Capture { capture_client };
 
-            let audio_clock = get_audio_clock(audio_client).map_err(|err| {
-                (*audio_client).Release();
-                err
-            })?;
+            let audio_clock =
+                get_audio_clock(std::mem::transmute(audio_client)).map_err(|err| {
+                    (*audio_client).Release();
+                    err
+                })?;
 
             Ok(StreamInner {
                 audio_client: std::mem::transmute(audio_client),
@@ -859,7 +864,10 @@ impl Device {
                 let share_mode = AUDCLNT_SHAREMODE_SHARED;
 
                 // Ensure the format is supported.
-                match super::device::is_format_supported((*audio_client).deref().deref(), &format_attempt.Format) {
+                match super::device::is_format_supported(
+                    (*audio_client).deref().deref(),
+                    &format_attempt.Format,
+                ) {
                     Ok(false) => return Err(BuildStreamError::StreamConfigNotSupported),
                     Err(_) => return Err(BuildStreamError::DeviceNotAvailable),
                     _ => (),
@@ -880,9 +888,21 @@ impl Device {
                 let mut max_period_in_frames: UINT32 = 0;
                 // println!("{:?}", waveformatex.nSamplesPerSec);
                 //TODO: if this fails, fall back to normal Initialize
-                let hr = (*audio_client).GetSharedModeEnginePeriod(&format_attempt.Format, &mut default_period_in_frames, &mut fundamental_period_in_frames, &mut min_period_in_frames, &mut max_period_in_frames);
+                let hr = (*audio_client).GetSharedModeEnginePeriod(
+                    &format_attempt.Format,
+                    &mut default_period_in_frames,
+                    &mut fundamental_period_in_frames,
+                    &mut min_period_in_frames,
+                    &mut max_period_in_frames,
+                );
                 println!("{:?}", check_result(hr));
-                println!("{} {} {} {}", default_period_in_frames, fundamental_period_in_frames, min_period_in_frames, max_period_in_frames);
+                println!(
+                    "{} {} {} {}",
+                    default_period_in_frames,
+                    fundamental_period_in_frames,
+                    min_period_in_frames,
+                    max_period_in_frames
+                );
 
                 // let mut min : REFERENCE_TIME = 0;
                 // let mut max : REFERENCE_TIME = 0;
@@ -906,7 +926,6 @@ impl Device {
                     }
                     Ok(()) => (),
                 };
-
 
                 // finally initializing the audio client
                 // let hresult = (*audio_client).Initialize(
@@ -940,29 +959,34 @@ impl Device {
 
                 format_attempt.Format
             };
-                use host::wasapi::winapi::shared::mmreg::WAVEFORMATEX;
-                // let mut format: WAVEFORMATEX = WAVEFORMATEX{
-                //     wFormatTag: 0,
-                //     nChannels: 0,
-                //     nSamplesPerSec: 0,
-                //     nAvgBytesPerSec: 0,
-                //     nBlockAlign: 0,
-                //     wBitsPerSample: 0,
-                //     cbSize: 0,
-                // };
-                use host::wasapi::winapi::um::strmif::REFERENCE_TIME;
+            use host::wasapi::winapi::shared::mmreg::WAVEFORMATEX;
+            // let mut format: WAVEFORMATEX = WAVEFORMATEX{
+            //     wFormatTag: 0,
+            //     nChannels: 0,
+            //     nSamplesPerSec: 0,
+            //     nAvgBytesPerSec: 0,
+            //     nBlockAlign: 0,
+            //     wBitsPerSample: 0,
+            //     cbSize: 0,
+            // };
+            use host::wasapi::winapi::um::strmif::REFERENCE_TIME;
 
-                let mut min : REFERENCE_TIME = 0;
-                let hr = (*audio_client).GetStreamLatency(&mut min);
-                println!("streamlatency {:?}, {}", check_result(hr), min);
+            let mut min: REFERENCE_TIME = 0;
+            let hr = (*audio_client).GetStreamLatency(&mut min);
+            println!("streamlatency {:?}, {}", check_result(hr), min);
 
-                let mut offload_capable : BOOL = 0;
-                let hr = (*audio_client).IsOffloadCapable(AudioCategory_GameEffects, &mut offload_capable);
-                println!("offload_capable {:?}, {}", check_result(hr), offload_capable);
+            let mut offload_capable: BOOL = 0;
+            let hr =
+                (*audio_client).IsOffloadCapable(AudioCategory_GameEffects, &mut offload_capable);
+            println!(
+                "offload_capable {:?}, {}",
+                check_result(hr),
+                offload_capable
+            );
 
-                let mut buf_size = 0u32;
-                (*audio_client).GetBufferSize(&mut buf_size);
-                println!("buf_size: {} frames", buf_size);
+            let mut buf_size = 0u32;
+            (*audio_client).GetBufferSize(&mut buf_size);
+            println!("buf_size: {} frames", buf_size);
 
             // Creating the event that will be signalled whenever we need to submit some samples.
             let event = {
@@ -1035,10 +1059,11 @@ impl Device {
             // `run()` method and added to the `RunContext`.
             let client_flow = AudioClientFlow::Render { render_client };
 
-            let audio_clock = get_audio_clock(audio_client).map_err(|err| {
-                (*audio_client).Release();
-                err
-            })?;
+            let audio_clock =
+                get_audio_clock(std::mem::transmute(audio_client)).map_err(|err| {
+                    (*audio_client).Release();
+                    err
+                })?;
 
             Ok(StreamInner {
                 audio_client: std::mem::transmute(audio_client),
