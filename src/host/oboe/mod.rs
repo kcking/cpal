@@ -210,6 +210,11 @@ fn configure_for_device<D, C, I>(
     } else {
         builder
     };
+    if let BufferSize::Fixed(buffer_size) = config.buffer_size {
+        if buffer_size <= 512 {
+            builder = builder.set_performance_mode(oboe::PerformanceMode::LowLatency);
+        }
+    }
     builder = builder.set_sample_rate(config.sample_rate.0.try_into().unwrap());
     match &config.buffer_size {
         BufferSize::Default => builder,
